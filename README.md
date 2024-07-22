@@ -4,7 +4,7 @@
 ## Introduction
 Here we copy from the amazing work [Splatam](https://github.com/spla-tam/SplaTAM) and illustrate how to add our proposed PoseNet for better tracking. Please refer to orginal Splatam and our work [Continuous Pose in NeRF](https://github.com/qimaqi/Continuous-Pose-in-NeRF) for more details and usage.
 
-##### Installatation and Data prepare
+#### Installatation and Data prepare
 Here we follow the same as Splatam
 SplaTAM has been tested on python 3.10, CUDA>=11.6. The simplest way to install all dependences is to use [anaconda](https://www.anaconda.com/) and [pip](https://pypi.org/project/pip/) in the following steps: 
 
@@ -22,7 +22,7 @@ conda env create -f environment.yml
 conda activate splatam
 ```
 
-##### Independences
+#### Independences
 We add two more scripts to Splatam, you can copy it to your slam-project. ***utils/PoseNet.py*** and ***utils/rotation_conversions.py.***
 Then in main scripts ***scripts/splatam.py*** we add 
 ```python
@@ -31,8 +31,9 @@ from utils import rotation_conversions
 ```
 
 
-##### Change Tracking
+#### Change Tracking
 Since now we do not want to initialize independent parameters for tracking, but using time + PoseNet to output pose for optimization, we need to do following modifications:
+
 ---
 - Step 0:
  - Initialize the PoseNet, we basically just need the number of frames, if you do not know in your case, just put a large number here. If you want to small model, feel free to change the layers_feat
