@@ -92,7 +92,7 @@ Since now we do not want to initialize independent parameters for tracking, but 
     ```
     By doing so after each optimization step we will multiple our new estimate pose on this. Note we convert quaternion to matrix but this is not necessary, you can directly do multiplication on quaternion since RotsNet output normalized quaternion
 
-  - Last we calculate new pose estimation and put it back to ```params``
+  - Last we calculate new pose estimation and put it back to ```params```
   ```python
   rots_delta_mat = rotation_conversions.quaternion_to_matrix(rots_delta)
   rots_new_est = torch.matmul(current_cam_unnorm_rot_est_mat, rots_delta_mat) 
