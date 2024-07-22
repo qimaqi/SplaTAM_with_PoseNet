@@ -35,7 +35,7 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_wandb=True,
+    use_wandb=False,
     wandb=dict(
         entity="theairlab",
         project="SplaTAM",
@@ -45,7 +45,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="./data/Replica",
+        basedir="/scratch_net/schusch/qimaqi/MonoGS/datasets/replica",
         gradslam_data_cfg="./configs/data/replica.yaml",
         sequence=scene_name,
         desired_image_height=680,
@@ -57,7 +57,7 @@ config = dict(
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
-        forward_prop=True, # Forward Propagate Poses
+        forward_prop=False, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
         sil_thres=0.99,

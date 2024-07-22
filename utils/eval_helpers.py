@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 
-from datasets.gradslam_datasets.geometryutils import relative_transformation
+from splatam_datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera
 from utils.slam_external import build_rotation,calc_psnr
 from utils.slam_helpers import transform_to_frame, transformed_params2rendervar, transformed_params2depthplussilhouette

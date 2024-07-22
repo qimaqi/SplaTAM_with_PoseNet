@@ -20,8 +20,10 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
+from utils.PoseNet import TransNet, RotsNet
+from utils import rotation_conversions
 
-from datasets.gradslam_datasets import (
+from splatam_datasets.gradslam_datasets import (
     load_dataset_config,
     ICLDataset,
     ReplicaDataset,
@@ -128,7 +130,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_posenet=False):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -145,7 +147,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist):
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
     params['cam_unnorm_rots'] = cam_rots
-    params['cam_trans'] = np.zeros((1, 3, num_frames))
+    params['cam_trans'] = np.zeros((1, 3, num_frames)) # .cuda().float().requires_grad_(False)
 
     for k, v in params.items():
         # Check if value is already a torch tensor
@@ -153,6 +155,17 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist):
             params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
         else:
             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
+        # if not use_posenet:
+        #     if not isinstance(v, torch.Tensor):
+        #         params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
+        #     else:
+        #         params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
+        # else:
+        #     if k not in ['cam_unnorm_rots', 'cam_trans']:
+        #         if not isinstance(v, torch.Tensor):
+        #             params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
+        #         else:
+        #             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))            
 
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -162,16 +175,29 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist):
     return params, variables
 
 
-def initialize_optimizer(params, lrs_dict, tracking):
+def initialize_optimizer(params, lrs_dict, tracking, transNet=None, rotsNet=None):
     lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
     if tracking:
-        return torch.optim.Adam(param_groups)
+        if transNet is not None and rotsNet is not None:
+            # we do not want to update cam_unnorm_rots=0.0004 and cam_trans=0.002,
+            # but we want to update the weights of the networks
+            params['cam_unnorm_rots'] = torch.nn.Parameter(params['cam_unnorm_rots'].cuda().float().contiguous().requires_grad_(False))
+            params['cam_trans'] = torch.nn.Parameter(params['cam_trans'].cuda().float().contiguous().requires_grad_(False))
+            param_groups = [{'params': [v for k, v in params.items() if k not in ["cam_unnorm_rots","cam_trans"]]}]
+            param_groups.append({'params': transNet.parameters(), 'name': "transNet", 'lr': lrs['cam_trans']})
+            param_groups.append({'params': rotsNet.parameters(), 'name': "rotsNet", 'lr': lrs['cam_unnorm_rots']})
+            return torch.optim.Adam(param_groups)
+        else:
+            return torch.optim.Adam(param_groups)
     else:
+        # in mapping we want to set cam_unnorm_rots to be differentiable agai  
+        params['cam_unnorm_rots'] = torch.nn.Parameter(params['cam_unnorm_rots'].cuda().float().contiguous().requires_grad_(True))
+        params['cam_trans'] = torch.nn.Parameter(params['cam_trans'].cuda().float().contiguous().requires_grad_(True))
+        param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None):
+def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_posenet=False):
     # Get RGB-D Data & Camera Parameters
     color, depth, intrinsics, pose = dataset[0]
 
@@ -204,7 +230,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, mea
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist)
+    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_posenet=use_posenet)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio
@@ -463,7 +489,7 @@ def rgbd_slam(config: dict):
     output_dir = os.path.join(config["workdir"], config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
-    
+
     # Init WandB
     if config['use_wandb']:
         wandb_time_step = 0
@@ -529,6 +555,16 @@ def rgbd_slam(config: dict):
     if num_frames == -1:
         num_frames = len(dataset)
 
+
+    ##### create PoseNet 
+    posenet_config = { 'n_img':num_frames , 'tracking': {"poseNet_freq": 5, "device": "cuda:0", "layers_feat": [None,256,256,256,256,256,256,256,256],"skip": [4] }
+    }
+    transNet = TransNet(posenet_config)
+    transNet = transNet.to(device)
+    rotsNet = RotsNet(posenet_config)
+    rotsNet = rotsNet.to(device)
+
+
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
         densify_dataset = get_dataset(
@@ -550,12 +586,14 @@ def rgbd_slam(config: dict):
             densify_intrinsics, densify_cam = initialize_first_timestep(dataset, num_frames,
                                                                         config['scene_radius_depth_ratio'],
                                                                         config['mean_sq_dist_method'],
-                                                                        densify_dataset=densify_dataset)                                                                                                                  
+                                                                        densify_dataset=densify_dataset,
+                                                                        use_posenet=True if transNet is not None else False)                                                                                                                  
     else:
         # Initialize Parameters & Canoncial Camera parameters
         params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(dataset, num_frames, 
                                                                                         config['scene_radius_depth_ratio'],
-                                                                                        config['mean_sq_dist_method'])
+                                                                                        config['mean_sq_dist_method'],
+                                                                                        use_posenet=True if transNet is not None else False)
     
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
@@ -665,15 +703,18 @@ def rgbd_slam(config: dict):
         # Initialize the camera pose for the current frame
         if time_idx > 0:
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+            current_cam_unnorm_rot_est = params['cam_unnorm_rots'][..., time_idx].detach().clone() 
+            candidate_cam_tran_est = params['cam_trans'][..., time_idx].detach().clone()
+            current_cam_unnorm_rot_est_mat = rotation_conversions.quaternion_to_matrix(current_cam_unnorm_rot_est)
 
         # Tracking
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
-            # Keep Track of Best Candidate Rotation & Translation
-            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-            candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+            # add PoseNet to optimizer
+            optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True, transNet=transNet, rotsNet=rotsNet)
+
+            
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -681,6 +722,19 @@ def rgbd_slam(config: dict):
             num_iters_tracking = config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
             while True:
+                # after step update the camera pose
+                trans_delta = transNet(time_idx)
+                rots_delta = rotsNet(time_idx) 
+                # print("trans_delta", trans_delta)
+                # print("rots_delta", rots_delta)
+
+                rots_delta_mat = rotation_conversions.quaternion_to_matrix(rots_delta)
+                rots_new_est = torch.matmul(current_cam_unnorm_rot_est_mat, rots_delta_mat) 
+                params['cam_unnorm_rots'] = params['cam_unnorm_rots'].clone().detach()
+                params['cam_trans'] = params['cam_trans'].clone().detach()
+                params['cam_unnorm_rots'][..., time_idx] =  rotation_conversions.matrix_to_quaternion(rots_new_est)
+                params['cam_trans'][..., time_idx] = (candidate_cam_tran_est + trans_delta)
+
                 iter_start_time = time.time()
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
@@ -692,10 +746,12 @@ def rgbd_slam(config: dict):
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
                 # Backprop
+                # print("loss", loss)
                 loss.backward()
                 # Optimizer Update
                 optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=True) # 
+
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
                     if loss < current_min_loss:
